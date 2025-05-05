@@ -1,0 +1,1716 @@
+---
+format:
+  html:
+    theme: [source/custom.scss, none]
+editor: source
+execute:
+  echo: false
+  output: false
+  cache: false
+engine: knitr
+---
+
+::: setup
+{{< include source/scrollytelling.qmd >}}
+
+```{r}
+#| include: false
+#| #| label: prerender
+source("source/fns1.R")
+source("source/helpers.R")
+source("R/fns-pop.R")
+
+city_dir <- paste_path("mnt/", readLines("city-dir.txt"))
+user_input_dir <- paste_path(city_dir, "01-user-input/")
+process_output_dir <- paste_path(city_dir, "02-process-output/")
+spatial_dir <- paste_path(process_output_dir, "spatial/")
+output_dir <- paste_path(city_dir, "03-render-output/")
+styled_maps_dir <- "generated/styled-maps/"
+
+# City parameters
+city_params <- read_yaml(paste_path(user_input_dir, "city_inputs.yml"))
+# cities <- list.files("cities")
+city <- city_params$city_name
+city_string <- tolower(city) %>% stringr::str_replace_all(" ", "-")
+country <- city_params$country
+
+# Load map layer parameters
+layer_params_file <- 'source/layers.yml' 
+layer_params <- read_yaml(layer_params_file)
+cover_image <- fuzzy_read(process_output_dir, "footprints", paste)
+```
+
+```{r}
+#| include: false
+# Visualization parameters (Am I using all of them?)
+basemap_opacity <- 0.3
+legend_opacity <- 0.8
+vwidth <- 900
+vheight <- vwidth
+layer_alpha <- 0.8
+map_width <- 6.9
+map_height <- 5.9
+aspect_ratio <- map_width / map_height
+# this is to enable fractional zoom in mapshot
+useragent <- 'Mozilla/5.0 (compatible; MSIE 10.6; Windows NT 6.1; Trident/5.0; InfoPath.2; SLCC1; .NET CLR 3.0.4506.2152; .NET CLR 3.5.30729; .NET CLR 2.0.50727) 3gpp-gba UNTRUSTED/1.0'
+```
+
+---
+title: "`r paste(city, country, sep = ', ')` Future City Scan"
+---
+
+```{r}
+# Get text
+city_text <- read_md(file.path(user_input_dir, "text-files/manual-text.md"))
+generic_text <- read_yaml("source/generic-text.yml")
+slide_texts <- merge_lists(city_text, generic_text)
+```
+
+```{r}
+#| include: false
+
+# Define the AOI
+aoi <- st_read(paste_path(user_input_dir, "AOI"))
+aoi_bounds <- st_bbox(aoi)
+static_map_bounds <- aspect_buffer(aoi, aspect_ratio, buffer_percent = 0.05)
+# Inititate the map here, will build on it in each "slide"
+all_maps <- plot_basemap("vector")
+pop_maps <-plot_basemap("satellite")
+gdp_maps <-plot_basemap("vector")
+urbanland_maps <-plot_basemap("vector")
+#ssp layers 
+ssp2 <-plot_basemap("vector")
+ssp3 <-plot_basemap("vector")
+ssp5 <-plot_basemap("vector")
+year_2020 <-plot_basemap("vector")
+year_2050 <-plot_basemap("vector")
+year_2080 <-plot_basemap("vector")
+year_2100 <-plot_basemap("vector")
+zoom <- round(14.6 + -0.00015 * units::drop_units(sqrt(st_area(aoi))))
+#tiles <- annotation_map_tile(type = "cartolight", zoom = zoom)
+
+# Keep track of added layers
+added_layers <- c()
+pop_layers <- c()
+gdp_layers <-c()
+ul_layers <-c()
+ahe_layers <-c()
+uhi_layers <-c()
+pu_layers <-c()
+fu_layers <-c()
+comb_layers <-c()
+```
+
+:::
+
+::: topbar
+# {{< meta title >}}
+
+::: navigation
+```{r}
+# Load necessary libraries
+library(htmltools)
+
+# Define function to handle selection
+selectYearAndSSP <- function(year, ssp) {
+  cat("Selected Year:", year, "\n")
+  cat("Selected SSP:", ssp, "\n")
+}
+
+# Define options for year and SSP
+yearOptions <- c('2020','2050','2080','2100')
+sspOptions <- c('SSP2','SSP3', 'SSP5')
+
+# Generate dropdown items for year and SSP
+yearDropdownItems <- lapply(yearOptions, function(year) {
+  tags$div(
+    class = "dropdown-item",
+    onclick = sprintf("$('#yearDropdownButton').text('%s'); selectYearAndSSP('%s', $('#sspDropdownButton').text())", year, year),
+    year
+  )
+})
+
+sspDropdownItems <- lapply(sspOptions, function(ssp) {
+  tags$div(
+    class = "dropdown-item",
+    onclick = sprintf("$('#sspDropdownButton').text('%s'); selectYearAndSSP($('#yearDropdownButton').text(), '%s')", ssp, ssp),
+    ssp
+  )
+})
+
+# Dropdown wrapper for year
+yearDropdownWrapper <- tags$div(
+  class = "dropdown",
+  tags$button(
+    class = "btn btn-primary dropdown-toggle",
+    type = "button",
+    id = "yearDropdownButton",
+    `data-toggle` = "dropdown",
+    `aria-haspopup` = "true",
+    `aria-expanded` = "false",
+    "Select Year"
+  ),
+  tags$div(
+    class = "dropdown-menu",
+    `aria-labelledby` = "yearDropdownButton",
+    yearDropdownItems
+  )
+)
+
+# Dropdown wrapper for SSP
+sspDropdownWrapper <- tags$div(
+  class = "dropdown",
+  tags$button(
+    class = "btn btn-primary dropdown-toggle",
+    type = "button",
+    id = "sspDropdownButton",
+    `data-toggle` = "dropdown",
+    `aria-haspopup` = "true",
+    `aria-expanded` = "false",
+    "Select SSP"
+  ),
+  tags$div(
+    class = "dropdown-menu",
+    `aria-labelledby` = "sspDropdownButton",
+    sspDropdownItems
+  )
+)
+
+# Custom CSS for button styles and positioning
+customStyles <- "
+  .btn-primary {
+    background-color: transparent;
+    border: none;
+    color: black;
+    margin-top: -1mm; /* Move buttons 1mm up */
+  }
+  .btn-primary:hover {
+    color: lightblue;
+  }
+"
+
+# Custom JavaScript to show dropdown on hover
+js_code <- '
+  $(".dropdown").hover(
+    function() {
+      $(this).addClass("show");
+      $(this).find(".dropdown-menu").addClass("show");
+    },
+    function() {
+      $(this).removeClass("show");
+      $(this).find(".dropdown-menu").removeClass("show");
+    }
+  );
+'
+
+# Combine dropdowns, CSS, and JavaScript
+dropdownWrapper <- tagList(
+  yearDropdownWrapper,
+  sspDropdownWrapper,
+  tags$style(HTML(customStyles)),
+  tags$script(HTML(js_code))
+)
+
+#dropdownWrapper
+
+```
+
+```{r}
+#| label: navigation
+#| output: asis
+sections <- readLines("index.qmd") %>%
+  str_subset("^## ") %>%
+  str_replace("## ", "")
+# Slugify section names to make anchor paths
+anchors <- sections %>%
+  tolower() %>%
+  str_replace_all(c("[^a-z\\s]" = "", "\\s+" = "-")) %>%
+  { paste0("#", .) }
+cat(sep = "\n",
+  "1. <span id='dynamic-header'>Future City Scan</span>  &or;",
+  paste0("    ", seq_along(sections), ". [", sections, "]", "(", anchors, ")"))
+
+
+```
+:::
+
+<div>
+by the [City Resilience Program](https://www.gfdrr.org/en/crp)
+</div>
+
+:::
+
+::: {#cover-page}
+# {{< meta title >}} 
+
+`r month.name[lubridate::month(Sys.Date())]` `r lubridate::year(Sys.Date())`
+
+::: donors
+![GFDRR](https://upload.wikimedia.org/wikipedia/commons/f/fe/GFDRR_Primary_Logo_BW-Shade-nobg.png)
+![World Bank](https://landportal.org/sites/default/files/2024-03/WorldBank_Logo_optimized-17.png)
+![Austrian Federal Ministry of Finance](https://www.bmf.gv.at/dam/jcr:b259928e-ef89-43c8-9bf3-4d2dae928bcd/BMF_Logo_srgb_EN.png)
+![Swiss Confederation Federal Department of Economic Affairs State Secretariat for Economic Affairs SECO](https://biotrade-asia.com/wp-content/uploads/2022/05/Logo-Swiss.png)
+:::
+
+:::
+
+<div id="cover-map">
+![](`r cover_image`)
+</div>
+
+::: text-column
+## Setting the Context
+
+### Basic City Information
+
+```{r}
+# Add a map layer? But it's just the AOI
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$setting_the_context$basic_city_info)
+```
+
+<!-- ### The State of Urban Infrastructure and Service Delivery -->
+
+<!-- ```{r} -->
+
+<!-- #| output: asis -->
+
+<!-- print_slide_text(slide_texts$setting_the_context$infrastructure_and_service_delivery) -->
+
+<!-- ``` -->
+## Service Delivery
+::: {.callout-caution collapse="true"}
+## Housing and Urban Development
+The future housing and urban development policy for Chittagong, Bangladesh will focus on stricter urban growth boundaries, prioritizing slum rehabilitation and in-situ upgrading, development of mixed-use areas, increased emphasis on sustainable infrastructure, and improved public transportation networks to manage the city's rapid population growth while mitigating environmental concerns and providing affordable housing for all income levels
+:::
+
+::: {.callout-caution collapse="true"}
+## Water Supply and Hygiene
+The future water supply policy for Chittagong, Bangladesh, primarily focuses on improving the existing water distribution network through the "Chittagong Water Supply Improvement and Sanitation Project (CWSISP)" by investing in infrastructure upgrades, reducing water losses, and strengthening operational management, aiming to provide sustainable and resilient water access to the city's growing population while addressing climate change concerns through efficient water usage and robust disaster preparedness strategies, mainly managed by the Chittagong Water Supply and Sewerage Authority (CWASA).
+:::
+
+::: {.callout-caution collapse="true"}
+## Governance
+Smart Bangladesh is an inclusive digital transformation initiative and a grand vision of the government, advancing towards becoming a developed, prosperous, and smart nation by focusing on four key pillars: smart citizens, smart government, smart economy, and smart society.
+:::
+
+::: {.callout-caution collapse="true"}
+## Climate Adaptation
+In Chittagong, Bangladesh, planned climate adaptation policies currently focus on developing a new city master plan with emphasis on stormwater drainage, flood control, transportation, and environmental management, aiming to build resilience against increasing climate change impacts like heavy rainfall and rising sea levels; this plan is being drafted by the Chittagong Development Authority and is expected to include actions for community awareness and capacity building to address climate risks
+:::
+## Population and Demographic Trends
+
+### Population Growth
+
+<!-- ![](generated/generated/plots/oxford-pop-growth.png) -->
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+popdynamics <- read.csv("generated/popdynamics.csv")
+names(popdynamics) <- sapply(str_remove_all(colnames(popdynamics), "X"), "[")
+m <- as.matrix(popdynamics[, -1])
+rownames(m) <- popdynamics[['Scenario']]
+heatmap <- plot_ly(z = m, colorscale = "RdOrYl") %>%
+  add_heatmap(x = colnames(m), y = rownames(m)) %>%
+  layout(
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "SSP")
+  )
+heatmap
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_demographics$population_growth)
+```
+
+### Population Growth (chart)
+
+<!-- ![](generated/plots/oxford-pop-density-scatter.png) -->
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+#ggplotly(readRDS("generated/plots/density.rds") + labs(y = "People per square kilometer"))
+# matplot(t(m), type = "l",lty = 1,  xlab = "SSP Scenario", 
+#         ylab = "Population Growth")
+# legend("topleft", legend = rownames(m),col = 1:ncol(t(m)), lty = 1, cex = 0.8)
+plot_pop <- plot_ly(x = colnames(m)) 
+
+for (i in 1:nrow(m)) {
+  plot_pop <- add_trace(plot_pop, 
+                    y = m[i,], 
+                    type = 'scatter', 
+                    mode = 'lines',
+                    name = rownames(m)[i])
+}
+
+# Add layout
+plot_pop <- layout(
+  plot_pop,
+  title = "",
+  xaxis = list(title = "SSP Scenario"),
+  yaxis = list(title = "Population Growth"),
+  legend = list(
+    orientation = "h",  # Horizontal orientation
+    x = 0.5,            # Center horizontally
+    y = -0.2,           # Position below the plot
+    xanchor = "center", # Center alignment for x
+    yanchor = "top"     # Top alignment for y
+  )
+)
+
+plot_pop
+
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_demographics$population_density_chart)
+```
+
+### Population Density SSP2_2050
+
+```{r}
+#| include: false
+# Read population data
+pop <- fuzzy_read(spatial_dir, "popdynamics_SSP2_2050",rast_as_vect)
+values(pop)[values(pop) == 0] <-NA
+add_pop_layer <- create_layer_function(data = pop, yaml_key = "pop",group_id="population-density-ssp2_2050",title="Population Density")
+all_maps <- add_pop_layer(all_maps)
+ssp2 <- add_pop_layer(ssp2)
+year_2050 <- add_pop_layer(year_2050)
+pop_layers <- c(pop_layers, "population-density-ssp2_2050")
+#pop_text <-rate_of_change_ssp(popdynamics,"SSP2",2020, 2050)
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_demographics$population_density_SSP2_2050)
+```
+
+### Population Density SSP2_2100
+
+```{r}
+#| include: false
+# Read population data
+pop1 <- fuzzy_read(spatial_dir, "clipped_popdynamics_SSP2_2100",rast_as_vect)
+values(pop1)[values(pop1) == 0] <-NA
+add_pop1_layer <- create_layer_function(data = pop1, yaml_key = "pop",group_id="population-density-ssp2_2100",title="Population Density")
+all_maps <- add_pop1_layer(all_maps)
+ssp2 <-add_pop1_layer(ssp2)
+year_2100 <-add_pop1_layer(year_2100)
+  # This could be put into the add_*_layer() functions themselves
+  # hideGroup("population-density")
+pop_layers <- c(pop_layers, "population-density-ssp2_2100")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_demographics$population_density_SSP2_2100)
+```
+
+### Population Density SSP5_2050
+
+```{r}
+ #include: false
+pop2 <- fuzzy_read(spatial_dir, "popdynamics_SSP5_2050",rast_as_vect)
+values(pop2)[values(pop2) == 0] <-NA
+add_pop2_layer <- create_layer_function(data = pop2, yaml_key = "pop",group_id="population-density-ssp5_2050",title="Population Density")
+all_maps <- add_pop2_layer(all_maps)
+ssp5 <- add_pop2_layer(ssp5)
+year_2050 <- add_pop2_layer(year_2050)
+pop_layers <- c(pop_layers, "population-density-ssp5_2050")
+#pop_text <-rate_of_change_ssp(popdynamics, "SSP5",2020, 2050)
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_demographics$population_density_SSP5_2050)
+```
+
+### Population Density SSP5_2100
+
+```{r}
+#| include: false
+# Read population data
+pop3 <- fuzzy_read(spatial_dir, "popdynamics_SSP5_2100",rast_as_vect)
+values(pop3)[values(pop3) == 0] <-NA
+add_pop3_layer <- create_layer_function(data = pop3, yaml_key = "pop",group_id="population-density-ssp5_2100",title="Population Density")
+
+all_maps <- add_pop3_layer(all_maps)
+ssp5 <- add_pop3_layer(ssp5)
+year_2100 <- add_pop3_layer(year_2100)
+  # This could be put into the add_*_layer() functions themselves
+  # hideGroup("population-density")
+pop_layers <- c(pop_layers, "population-density-ssp5_2100")
+#pop_text <-rate_of_change_ssp(popdynamics, "SSP5",2020, 2100)
+```
+
+```{r}
+# add_pop3_layer <- create_layer_function(data = pop3, yaml_key = "pop",title="POP",group_id="population-density-ssp5_2050")
+# add_pop3_layer(plot_basemap())
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_demographics$population_density_SSP5_2100)
+```
+
+## GDP
+
+### GDP Projections
+
+<!-- ![](generated/generated/plots/oxford-pop-growth.png) -->
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+#ggplotly(readRDS("generated/plots/density.rds") + labs(y = "People per square kilometer"))
+gdp <-read.csv("generated/gdp.csv")
+names(gdp)<-sapply(str_remove_all(colnames(gdp),"X"),"[")
+g <- as.matrix(gdp[, -1])
+rownames(g) <- gdp[['Scenario']]
+heatmap_gdp <- plot_ly(z = g, colorscale = "RdOrYl") %>%
+  add_heatmap(x = colnames(g), y = rownames(g)) %>%
+  layout(
+    title = "GDP",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Scenario")
+  )
+
+heatmap_gdp
+```
+
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_gross_domestic_product$gdp_growth)
+```
+
+### Projected GDP Growth(chart)
+
+<!-- ![](generated/plots/oxford-pop-density-scatter.png) -->
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+#ggplotly(readRDS("generated/plots/density.rds") + labs(y = "People per square kilometer"))
+rownames(g) <- gdp[['Scenario']]
+plot_gdp <- plot_ly(x = colnames(g)) 
+for (i in 1:nrow(g)) {
+  plot_gdp <- add_trace(plot_gdp, 
+                    y = g[i,], 
+                    type = 'scatter', 
+                    mode = 'lines',
+                    name = rownames(g)[i])
+}
+plot_gdp <- layout(plot_gdp,
+               title = "",
+               xaxis = list(title = "SSP Scenario"),
+               yaxis = list(title = "GDP Growth"),
+               legend = list(
+                orientation = "h",  # Horizontal orientation
+                x = 0.5,            # Center horizontally
+                y = -0.2,           # Position below the plot
+                xanchor = "center", # Center alignment for x
+                yanchor = "top"     # Top alignment for y
+              )
+              )
+
+plot_gdp
+
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_gross_domestic_product$gdp_chart)
+```
+
+### GDP SSP2_2050
+
+```{r}
+#| include: false
+gdp <- fuzzy_read(spatial_dir, "gdp_SSP2_2050",rast_as_vect)
+#gdp <- fuzzy_read(spatial_dir, "gdp_SSP2_2050.tif", rast)
+values(gdp)[values(gdp) == 0] <-NA
+#gdp <- as.polygons(gdp, digits=4)
+add_gdp_layer <- create_layer_function(data = gdp, yaml_key = "gdp",group_id="gdp-ssp2_2050",title="GDP")
+all_maps <- add_gdp_layer(all_maps)
+ssp2 <- add_gdp_layer(ssp2)
+year_2050 <-add_gdp_layer(year_2050)
+gdp_layers <- c(gdp_layers, "gdp-ssp2_2050")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_gross_domestic_product$gdp_SSP2_2050)
+```
+
+### GDP SSP2_2100
+
+```{r}
+#| include: false
+gdp1 <- fuzzy_read(spatial_dir, "gdp_SSP2_2100",rast_as_vect)
+values(gdp1)[values(gdp1) == 0] <-NA
+add_gdp1_layer <- create_layer_function(data = gdp1, yaml_key = "gdp",group_id="gdp-ssp2_2100",title="GDP")
+all_maps <- add_gdp1_layer(all_maps)
+ssp2<-add_gdp1_layer(ssp2)
+year_2100<-add_gdp1_layer(year_2100)
+gdp_layers <- c(gdp_layers, "gdp-ssp2_2100")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_gross_domestic_product$gdp_SSP2_2100)
+```
+
+### GDP SSP5_2050
+
+```{r}
+#| include: false
+gdp2 <- fuzzy_read(spatial_dir, "gdp_SSP5_2050",rast_as_vect)
+values(gdp2)[values(gdp2) == 0] <-NA
+add_gdp2_layer <- create_layer_function(data = gdp2, yaml_key = "gdp",group_id="gdp-ssp5_2050",title="GDP")
+all_maps <- add_gdp2_layer(all_maps)
+ssp5 <-add_gdp2_layer(ssp5)
+year_2050<-add_gdp2_layer(year_2050)
+gdp_layers <- c(gdp_layers, "gdp-ssp5_2050")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_gross_domestic_product$gdp_SSP5_2050)
+```
+
+### GDP SSP5_2100
+
+```{r}
+#| include: false
+gdp3 <- fuzzy_read(spatial_dir, "gdp_SSP5_2100",rast_as_vect)
+values(gdp3)[values(gdp3) == 0] <-NA
+add_gdp3_layer <- create_layer_function(data = gdp3, yaml_key = "gdp",group_id="gdp-ssp5_2100",title="GDP")
+all_maps <- add_gdp3_layer(all_maps)
+ssp5 <-add_gdp3_layer(ssp5)
+year_2100 <-add_gdp3_layer(year_2100)
+gdp_layers <- c(gdp_layers, "gdp-ssp5_2100")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_gross_domestic_product$gdp_SSP5_2100)
+```
+
+## Heat Flux
+
+### Heatflux Growth(chart)
+
+<!-- ![](generated/plots/oxford-pop-density-scatter.png) -->
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+#ggplotly(readRDS("generated/plots/density.rds") + labs(y = "People per square kilometer"))
+ahe_graph <-read.csv("generated/heatflux.csv")
+ahe_graph[, -1] <- ahe_graph[, -1] / 1e4
+names(ahe_graph)<-sapply(str_remove_all(colnames(ahe_graph),"X"),"[")
+h <- as.matrix(ahe_graph[, -1])
+
+rownames(h) <- ahe_graph[['Scenario']]
+custom_colors <- c("#FF0000","#FFFF00")
+plot_ahe <- plot_ly()
+
+for (i in 1:nrow(h)) {
+  plot_ahe <- add_trace(plot_ahe, 
+                    x = colnames(h), 
+                    y = h[i,], 
+                    type = 'bar',
+                    name = rownames(h)[i],
+                    marker = list(color = custom_colors[i], 
+                                      line = list(width = 1),  
+                                      width = 0.2))
+}
+
+plot_ahe <- layout(plot_ahe,
+               title = "",
+               xaxis = list(title = "Year"),
+               yaxis = list(title = "W/m2"),
+               barmode = 'group')  
+
+# Show the plot
+
+plot_ahe
+
+
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ahe$ahe_growth)
+```
+
+### Heat Flux SSP3_2050
+
+```{r}
+#| include: false
+ahe <- fuzzy_read(spatial_dir, "AHE_ssp3_2050",rast)
+ahe <- mask(ahe, aoi)
+ahe[ahe < 0] <- NA
+ahe <- ahe / 100000
+add_ahe_layer <- create_layer_function(data = ahe, yaml_key = "ahe",group_id="heat-flux-ssp3_2050",title="Heat Flux")
+all_maps <- add_ahe_layer(all_maps)
+ssp3 <- add_ahe_layer(ssp3)
+year_2050 <-add_ahe_layer(year_2050)
+ahe_layers <- c(ahe_layers, "heat-flux-ssp3_2050")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ahe$ahe_SSP3_2050)
+```
+
+## Urban Land
+
+### Urban Land Projections
+
+<!-- ![](generated/generated/plots/oxford-pop-growth.png) -->
+
+```{r, output=TRUE}
+ul_graph <-read.csv("generated/urbanland.csv")
+names(ul_graph)<-sapply(str_remove_all(colnames(ul_graph),"X"),"[")
+u <- as.matrix(ul_graph[, -1])
+rownames(u) <- ul_graph[['Scenario']]
+years <- as.numeric(colnames(u))
+start_year <- 2020
+start_index <- which(years >= start_year)[1]
+
+# Subset the matrix to include data from 2020 onwards
+u_subset <- u[, start_index:length(years)]
+
+# Plot the heatmap
+heatmap_ul <- plot_ly(z = u_subset, colorscale = "RdOrYl") %>%
+  add_heatmap(x = colnames(u_subset), y = rownames(u_subset)) %>%
+  layout(
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Urban Land Growth")
+  )
+
+heatmap_ul
+#ul_roc <- rate_of_change(ul_graph)
+#ul_text_SSP2_2050 <-rate_of_change_ssp(ul_graph, "SSP2",2020, 2050)
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ul$ul_growth)
+```
+
+### Urban Land Growth 
+
+<!-- ![](generated/plots/oxford-pop-density-scatter.png) -->
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+#ggplotly(readRDS("generated/plots/density.rds") + labs(y = "People per square kilometer"))
+plot_ul <- plot_ly(x = colnames(u_subset))  # Using column names of u_subset
+
+for (i in 1:nrow(u_subset)) {
+  plot_ul <- add_trace(
+    plot_ul,
+    y = u_subset[i, ],
+    type = 'scatter',
+    mode = 'lines',
+    name = rownames(u_subset)[i]
+  )
+}
+
+plot_ul <- layout(
+  plot_ul,
+  title = "",
+  xaxis = list(title = "SSP Scenario"),
+  yaxis = list(title = "Urban Land Expansion"),
+  legend = list(
+    orientation = "h",  # Horizontal orientation
+    x = 0.5,            # Center horizontally
+    y = -0.2,           # Position below the plot
+    xanchor = "center", # Center alignment for x
+    yanchor = "top"     # Top alignment for y
+  )
+)
+plot_ul
+
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ul$ul_chart)
+```
+
+### Urban Land SSP2_2050
+
+```{r}
+#| include: false
+ul <- fuzzy_read(spatial_dir, "urbanland_ssp2_2050",rast_as_vect)
+values(ul)[values(ul) == 0] <-NA
+add_ul_layer <- create_layer_function(data = ul, yaml_key = "ul",group_id="urban-land-ssp2_2050",title="Urban Land Expansion")
+all_maps <- add_ul_layer(all_maps)
+ssp2 <- add_ul_layer(ssp2)
+year_2050 <-add_ul_layer(year_2050)
+ul_layers <- c(ul_layers, "urban-land-ssp2_2050")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ul$ul_SSP2_2050)
+```
+
+### Urban Land SSP2_2100
+
+```{r}
+#| include: false
+ul1 <- fuzzy_read(spatial_dir, "urbanland_ssp2_2100",rast_as_vect)
+values(ul1)[values(ul1) == 0] <-NA
+add_ul1_layer <- create_layer_function(data = ul1, yaml_key = "ul",group_id="urban-land-ssp2_2100",title="Urban Land Expansion")
+all_maps <- add_ul1_layer(all_maps)
+ssp2 <- add_ul1_layer(ssp2)
+year_2100 <-add_ul1_layer(year_2100)
+ul_layers <- c(ul_layers, "urban-land-ssp2_2100")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ul$ul_SSP2_2100)
+```
+
+### Urban Land SSP5_2050
+
+```{r}
+#| include: false
+ul2 <- fuzzy_read(spatial_dir, "urbanland_ssp5_2050",rast_as_vect)
+values(ul2)[values(ul2) == 0] <-NA
+add_ul2_layer <- create_layer_function(data = ul2, yaml_key = "ul",group_id="urban-land-ssp5_2050",title="Urban Land Expansion")
+all_maps <- add_ul2_layer(all_maps)
+ssp5 <- add_ul2_layer(ssp5)
+year_2050 <-add_ul2_layer(year_2050)
+ul_layers <- c(ul_layers, "urban-land-ssp5_2050")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ul$ul_SSP5_2050)
+```
+
+### Urban Land SSP5_2100
+
+```{r}
+#| include: false
+ul3 <- fuzzy_read(spatial_dir, "urbanland_ssp5_2100",rast_as_vect)
+values(ul3)[values(ul3) == 0] <-NA
+add_ul3_layer <- create_layer_function(data = ul3, yaml_key = "ul",group_id="urban-land-ssp5_2100",title="Urban Land Expansion")
+all_maps <- add_ul3_layer(all_maps)
+ssp5 <- add_ul3_layer(ssp5)
+year_2100 <-add_ul3_layer(year_2100)
+ul_layers <- c(ul_layers, "urban-land-ssp5_2100")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_ul$ul_SSP5_2100)
+```
+
+## Climate
+
+### Temperature
+
+```{r, output=TRUE}
+ # temp_graph <- read.csv("generated/temperature.csv")
+ # plots_temp <- visualize_temperature(temp_graph,city, save_path="generated/temperature plots")
+```
+
+<!-- Slider 1 -->
+```{=html}
+ <div class="iframe-container" id="iframe-container1">
+  <iframe class="iframe" src="generated/temperature plots/plot_1.html"></iframe>
+  <iframe class="iframe" src="generated/temperature plots/plot_2.html"></iframe>
+  <iframe class="iframe" src="generated/temperature plots/plot_3.html"></iframe>
+  <iframe class="iframe" src="generated/temperature plots/plot_4.html"></iframe>
+  <iframe class="iframe" src="generated/temperature plots/plot_5.html"></iframe>
+  <iframe class="iframe" src="generated/temperature plots/plot_6.html"></iframe>
+  <iframe class="iframe" src="generated/temperature plots/plot_7.html"></iframe>
+  <button class="arrow-button left" id="prevButton" onclick="prevSlide()">&#9664;</button>
+  <button class="arrow-button right" id="nextButton" onclick="nextSlide()">&#9658;</button>
+</div>
+
+<style>
+  .iframe-container {
+    position: relative;
+    width: 100%; /* Adjust width as needed */
+    height: 600px; /* Adjust initial height as needed */
+    overflow: hidden;
+  }
+
+  .iframe {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    border: none;
+    opacity: 0;
+    transition: opacity 0.5s;
+  }
+
+  .iframe:first-child {
+    opacity: 1;
+  }
+
+  .arrow-button {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 100;
+    background-color: transparent;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+  }
+
+  .arrow-button.left {
+    left: 20px; /* Position the back button on the left side */
+  }
+
+  .arrow-button.right {
+    right: 20px; /* Position the next button on the right side */
+  }
+</style>
+
+<script>
+  var currentSlide = 0;
+  var iframes = document.querySelectorAll('.iframe');
+  var container = document.getElementById('iframe-container1');
+
+  function adjustSize() {
+    var currentIframe = iframes[currentSlide];
+    var contentWidth = currentIframe.contentWindow.document.body.scrollWidth;
+    var contentHeight = currentIframe.contentWindow.document.body.scrollHeight;
+
+    currentIframe.style.width = contentWidth + 'px';
+    currentIframe.style.height = contentHeight + 'px';
+    container.style.width = contentWidth + 'px';
+    container.style.height = contentHeight + 'px';
+  }
+
+  window.onload = adjustSize;
+  window.onresize = adjustSize;
+
+  function nextSlide() {
+    if (currentSlide < iframes.length - 1) {
+      iframes[currentSlide].style.opacity = '0';
+      currentSlide++;
+      iframes[currentSlide].style.opacity = '1';
+      adjustSize();
+    }
+  }
+
+  function prevSlide() {
+    if (currentSlide > 0) {
+      iframes[currentSlide].style.opacity = '0';
+      currentSlide--;
+      iframes[currentSlide].style.opacity = '1';
+      adjustSize();
+    }
+  }
+</script>
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_climate$temp_graph)
+```
+
+### Precipitation
+
+```{r, output=TRUE}
+# precip_graph <- read.csv("generated/precipitation.csv")
+# plots_precip <- visualize_precipitation(precip_graph,city, save_path ="generated/precipitation plots")
+```
+<!-- Slider 2 -->
+```{=html}
+<div class="iframe-container"id="iframe-container-2">
+  <iframe class="iframe" src="generated/precipitation plots/plot_a.html" width="100%" height="600px"></iframe>
+  <iframe class="iframe" src="generated/precipitation plots/plot_b.html" width="100%" height="600px"></iframe>
+  <iframe class="iframe" src="generated/precipitation plots/plot_c.html" width="100%" height="600px"></iframe>
+  <iframe class="iframe" src="generated/precipitation plots/plot_d.html" width="100%" height="600px"></iframe>
+  <iframe class="iframe" src="generated/precipitation plots/plot_e.html" width="100%" height="600px"></iframe>
+  <iframe class="iframe" src="generated/precipitation plots/plot_f.html" width="100%" height="600px"></iframe>
+  <iframe class="iframe" src="generated/precipitation plots/plot_g.html" width="100%" height="600px"></iframe>
+  <iframe class="iframe" src="generated/precipitation plots/plot_h.html" width="100%" height="600px"></iframe>
+  
+  <!-- Navigation Buttons -->
+  <button class="arrow-button left" onclick="previousSlide()">&#9664;</button>
+  <button class="arrow-button right" onclick="nextSlide()">&#9658;</button>
+</div>
+
+<style>
+  .iframe-container {
+    position: relative;
+    height: 600px;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .iframe {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    border: none;
+    opacity: 0;
+    transition: opacity 0.5s;
+  }
+
+  .iframe:first-child {
+    opacity: 1;
+  }
+
+  .arrow-button {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 100;
+    background-color: transparent;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+  }
+
+  .arrow-button.left {
+    left: 20px;
+  }
+
+  .arrow-button.right {
+    right: 20px;
+  }
+</style>
+
+<script>
+  var currentSlide = 0;
+  var iframes = document.querySelectorAll('.iframe');
+
+  function nextSlide() {
+    if (currentSlide < iframes.length - 1) {
+      iframes[currentSlide].style.opacity = '0';
+      currentSlide++;
+      iframes[currentSlide].style.opacity = '1';
+    }
+  }
+
+  function previousSlide() {
+    if (currentSlide > 0) {
+      iframes[currentSlide].style.opacity = '0';
+      currentSlide--;
+      iframes[currentSlide].style.opacity = '1';
+    }
+  }
+</script>
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_climate$precip_graph)
+```
+
+## Heat related Impacts
+
+### Urban Heat Island Projections
+
+<!-- ![](generated/generated/plots/oxford-pop-growth.png) -->
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+#ggplotly(readRDS("generated/plots/density.rds") + labs(y = "People per square kilometer"))
+heat_graph <- read.csv("generated/urbanheatisland.csv")
+names(heat_graph) <- sapply(str_remove_all(colnames(heat_graph), "X"), "[")
+heat <- as.matrix(heat_graph[, -1])
+rownames(heat) <- heat_graph[['Scenario']]
+
+
+custom_colors <- c("lightgrey", "red", "darkred")  # Yellow, Orange, Red
+
+
+plot_uhi <- plot_ly()
+
+
+heat <- heat[rowSums(heat != 0, na.rm = TRUE) > 0, ]
+
+max_value <- max(heat)
+
+for (i in 1:nrow(heat)) {
+  plot_uhi <- add_trace(plot_uhi, 
+                        x = colnames(heat), 
+                        y = heat[i,], 
+                        type = 'bar',
+                        name = rownames(heat)[i],
+                        marker = list(color = custom_colors[i]))
+}
+
+plot_uhi <- layout(plot_uhi,
+                   title = " ",
+                   xaxis = list(title = "Day and Night"),
+                   yaxis = list(title = "Urban Heat Island increase"),
+                   barmode = 'group',  
+                   showlegend = TRUE) 
+
+plot_uhi
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_uhi$uhi_chart)
+```
+
+### Urban Heat Island SSP5 2050 Day
+
+```{r}
+#| include: false
+uhi <- fuzzy_read(spatial_dir, "uhi-ssp5_day_sum_reproj",rast_as_vect)
+add_uhi_layer <- create_layer_function(data = uhi, yaml_key = "uhi",group_id="urban-heat-island-ssp5-2050-day",title="Urban Heat Island")
+all_maps <- add_uhi_layer(all_maps)
+ssp5 <- add_uhi_layer(ssp5)
+year_2050 <-add_uhi_layer(year_2050)
+uhi_layers <- c(uhi_layers, "urban-heat-island-ssp5-2050-day")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_uhi$uhi_SSP5_day)
+```
+
+### Urban Heat Island SSP5 2050 Night
+
+```{r}
+#| include: false
+uhi1 <- fuzzy_read(spatial_dir, "uhi-ssp5_nig_sum_reproj",rast_as_vect)
+values(uhi1)[values(uhi1) == 0] <-NA  
+uhi1 <- terra::project(uhi1, "epsg:4326") 
+add_uhi1_layer <- create_layer_function(data = uhi1, yaml_key = "uhi",group_id="urban-heat-island-ssp5-2050-night",title="Urban Heat Island")
+all_maps <- add_uhi1_layer(all_maps)
+ssp5 <- add_uhi1_layer(ssp5)
+year_2050 <-add_uhi1_layer(year_2050)
+uhi_layers <- c(uhi_layers, "urban-heat-island-ssp5-2050-night")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_uhi$uhi_SSP5_night)
+```
+
+## Floods
+### Infrastructure
+```{r}
+#| include: false
+health_points <- fuzzy_read(spatial_dir, "health$", FUN = vect)
+school_points <- fuzzy_read(spatial_dir, "education$", FUN = vect) 
+police_points <- fuzzy_read(spatial_dir, "police$", FUN = vect) 
+#road_lines <-fuzzy_read(spatial_dir, "roads_flood_SSP2_2050_1in100$", FUN = rast) 
+health_points$source <- "health"
+school_points$source <- "school"
+police_points$source <- "police"
+#values(road_lines)[values(road_lines) == 0] <-NA 
+#values(road_lines) <- ifelse(values(road_lines) > 1, 1, values(road_lines))
+# road_lines <- classify(road_lines, 
+#                        rcl = matrix(c(1, 1, 1), ncol = 3, byrow = TRUE))
+# 
+# levels(road_lines) <- data.frame(
+#   ID = 1,
+#   category = "Major Roads"
+# )
+
+infrastructure_points <- rbind(health_points, school_points, police_points)
+
+# Drop unwanted columns (e.g., FID columns)
+#nfrastructure_points <- infrastructure_points %>% select(!contains("fid"))
+
+# Save the combined vector layer to a GeoPackage
+if (!is.null(infrastructure_points)) {
+  writeVector(
+    infrastructure_points, 
+    filename = file.path(spatial_dir, "infrastructure.gpkg"), 
+    overwrite = TRUE
+  )
+}
+infrastructure_points$source <- factor(infrastructure_points$source, 
+                                       levels = c("police", "health", "school"),
+                                       labels = c("Police Stations", "Health", "Schools"))
+
+
+add_infrastructure_points_layer <- create_layer_function(data = infrastructure_points, yaml_key = "infrastructure-combined",group_id="infrastructure")
+# add_health_points_layer <- create_layer_function(data = health_points, yaml_key = "infrastructure-health",group_id="infrastructure")
+# add_school_points_layer <- create_layer_function(data = school_points, yaml_key = "infrastructure-school",group_id="infrastructure")
+# add_police_points_layer <- create_layer_function(data = police_points, yaml_key = "infrastructure-police",group_id="infrastructure")
+#add_roads_layer <-create_layer_function(data = road_lines, yaml_key = "infrastructure-roads",group_id="infrastructure")
+all_maps <-add_infrastructure_points_layer(all_maps)
+pu_layers <- c(pu_layers, "infrastructure")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$infrastructure)
+```
+
+### Combined Flooding 2020
+
+```{r}
+#| include: false
+library(raster)
+sub_dir <- "fathom"
+#comb_low_2020 <- fuzzy_read(spatial_dir, "comb_SSP1_2020_1in10.tif", rast)
+comb_med_2020 <- fuzzy_read(spatial_dir, "comb_SSP1_2020_1in100.tif", rast)
+comb_high_2020 <- fuzzy_read(spatial_dir, "comb_SSP1_2020_1in1000.tif", rast)
+# Interactive Plot (Leaflet)
+combined_2020 <- max(comb_med_2020, comb_high_2020, na.rm = TRUE)
+
+
+# Replace negative values with zero
+combined_2020_positive <- combined_2020
+combined_2020_positive[combined_2020_positive <= 0] <- NA
+infrastructure_points <- sf::st_as_sf(infrastructure_points)
+comb_high_2020_raster <- raster::raster(comb_high_2020)
+threshold_value <- 1
+results <- zonal_stats_binary(infrastructure_points, comb_high_2020_raster, threshold_value)
+output_file <- file.path(output_dir, "zonal_stats_results_2020.csv")
+write.csv(results, output_file, row.names = FALSE)
+add_comb_2020_layer <- create_layer_function(data = combined_2020_positive, yaml_key = "comb",group_id="combined-flooding-2020")
+all_maps <-add_comb_2020_layer(all_maps)
+comb_layers <- c(comb_layers, "combined-flooding-2020")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$comb_flooding_2020)
+```
+### Population Exposed 2020
+
+```{r}
+#| include: false
+pop_low_2020 <- fuzzy_read(spatial_dir, "exposure_of_Population_SSP1_2020_1in10.tif", rast)
+pop_med_2020 <- fuzzy_read(spatial_dir, "exposure_of_Population_SSP1_2020_1in100.tif", rast)
+pop_high_2020 <- fuzzy_read(spatial_dir, "exposure_of_Population_SSP1_2020_1in1000.tif", rast)
+# Interactive Plot (Leaflet)
+pop_2020 <- max(pop_low_2020, pop_med_2020,pop_high_2020,na.rm = TRUE)
+masked_pop_2020 <- mask(pop_2020, aoi)
+
+# # Replace negative values with zero
+# pop_2020_positive <- pop_2020
+# pop_2020_positive[pop_2020_positive <= 0] <- NA
+
+add_pop_2020_layer <- create_layer_function(data = masked_pop_2020, yaml_key = "pop_flood",group_id="population-exposed-2020")
+all_maps <-add_pop_2020_layer(all_maps)
+comb_layers <- c(comb_layers, "population-exposed-2020")
+```
+
+
+```{r}
+#| output: asis
+graphs_pop <- pop_exposed("generated/pop_exposure1.csv", 2020,"SSP1")
+graphs_pop
+print_slide_text(slide_texts$FCS_water$pop_flooding_2020)
+```
+### Roads Exposed 2020
+```{r}
+#| include: false
+road_low_2020 <- fuzzy_read(spatial_dir, "rce_SSP1_2020_1in10", rast)
+values(road_low_2020)[values(road_low_2020) == 0] <-NA  
+# # Replace negative values with zero
+road_low_2020_positive <- road_low_2020
+road_low_2020_positive[road_low_2020_positive <= 0] <- NA
+
+add_road_2020_layer <- create_layer_function(data = road_low_2020_positive, yaml_key = "roads-exposed",group_id="roads-exposed-2020")
+all_maps <-add_road_2020_layer(all_maps)
+comb_layers <- c(comb_layers, "roads-exposed-2020")
+```
+
+```{r}
+#| output: asis
+graphs_2020 <- roads_exposed("generated/road_exposure1.csv", 2020)
+graphs_2020[[1]]
+print_slide_text(slide_texts$FCS_water$road_flooding_2020)
+```
+
+### Combined Flooding SSP2 2050
+
+```{r}
+#| include: false
+comb_low_2050 <- fuzzy_read(spatial_dir, "comb_flood_SSP2_2050_1in10.tif", rast)
+comb_med_2050 <- fuzzy_read(spatial_dir, "comb_flood_SSP2_2050_1in100.tif", rast) * 10
+comb_high_2050 <- fuzzy_read(spatial_dir, "comb_flood_SSP2_2050_1in1000.tif", rast) * 11
+# Interactive Plot (Leaflet)
+combined_2050 <- max(comb_med_2050, comb_high_2050, na.rm = T)
+# Replace negative values with zero
+combined_2050_positive <- combined_2050
+combined_2050_positive[combined_2050_positive <= 0] <- NA
+
+comb_high_2050_raster <- raster::raster(comb_high_2050)
+threshold_value <- 1
+results <- zonal_stats_binary(infrastructure_points, comb_high_2050_raster, threshold_value)
+output_file <- file.path(output_dir, "zonal_stats_results_2050.csv")
+write.csv(results, output_file, row.names = FALSE)
+
+add_comb_2050_layer <- create_layer_function(data = combined_2050_positive, yaml_key = "comb",group_id="combined-flooding-ssp2-2050")
+all_maps <-add_comb_2050_layer(all_maps)
+ssp2 <- add_comb_2050_layer(ssp2)
+year_2050 <-add_comb_2050_layer(year_2050)
+comb_layers <- c(comb_layers, "combined-flooding-ssp2-2050")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$comb_flooding_SSP2_2050)
+```
+### Population Exposed SSP2 2050
+
+```{r}
+#| include: false
+pop_low_ssp2_2050 <- fuzzy_read(spatial_dir, "pop_comb_SSP2_2050_1in10.tif", rast)
+pop_med_ssp2_2050 <- fuzzy_read(spatial_dir, "pop_comb_SSP2_2050_1in100.tif", rast)
+pop_high_ssp2_2050 <- fuzzy_read(spatial_dir, "pop_comb_SSP2_2050_1in1000.tif", rast)
+# Interactive Plot (Leaflet)
+pop_ssp2_2050 <- max(pop_low_ssp2_2050,pop_med_ssp2_2050,pop_high_ssp2_2050,na.rm = TRUE)
+masked_pop_ssp2_2050 <- mask(pop_ssp2_2050, aoi)
+
+# # Replace negative values with zero
+# pop_2020_positive <- pop_2020
+# pop_2020_positive[pop_2020_positive <= 0] <- NA
+
+add_pop_ssp2_2050_layer <- create_layer_function(data = masked_pop_ssp2_2050, yaml_key = "pop_flood",group_id="population-exposed-ssp2-2050")
+all_maps <-add_pop_ssp2_2050_layer(all_maps)
+ssp2 <- add_pop_ssp2_2050_layer(ssp2)
+year_2050 <-add_pop_ssp2_2050_layer(year_2050)
+comb_layers <- c(comb_layers, "population-exposed-ssp2-2050")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_pop <- pop_exposed("generated/pop_exposure1.csv", 2050, "SSP2")
+graphs_pop
+print_slide_text(slide_texts$FCS_water$pop_flooding_2050)
+```
+
+###  Roads Exposed to Floods SSP2 2050
+
+```{r}
+#| include: false
+road_med_ssp2_2050 <- fuzzy_read(spatial_dir, "roads_flood_SSP2_2050_1in100", rast)
+values(road_med_ssp2_2050)[values(road_med_ssp2_2050) == 0] <-NA  
+road_med_ssp2_2050_positive <- road_med_ssp2_2050
+road_med_ssp2_2050_positive[road_med_ssp2_2050_positive <= 0] <- NA
+
+add_road_SSP2_2050_layer <- create_layer_function(data = road_med_ssp2_2050_positive, yaml_key = "roads-exposed",group_id="roads-exposed-to-floods-ssp2-2050")
+all_maps <-add_road_SSP2_2050_layer(all_maps)
+comb_layers <- c(comb_layers, "roads-exposed-to-floods-ssp2-2050")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_2050 <- roads_exposed("generated/road_exposure1.csv", 2050)
+graphs_2050[[2]]
+print_slide_text(slide_texts$FCS_water$comb_flooding_SSP2_2050)
+```
+### Combined Flooding SSP5 2050
+
+```{r}
+#| include: false
+#comb_low_2050 <- fuzzy_read(spatial_dir, "comb_flood_SSP5_2050_1in10.tif", rast)
+comb_med_2050 <- fuzzy_read(spatial_dir, "comb_flood_SSP5_2050_1in100.tif", rast) * 10
+comb_high_2050 <- fuzzy_read(spatial_dir, "comb_flood_SSP5_2050_1in1000.tif", rast) * 11
+combined_2050_5 <- max(comb_med_2050, comb_high_2050, na.rm = T)
+combined_2050_5_positive <- combined_2050_5
+combined_2050_5_positive[combined_2050_5_positive <= 0] <- NA
+comb_high_2050_5_rast <- raster::raster(combined_2050_5)
+threshold_value <- 1
+results <- zonal_stats_binary(infrastructure_points, comb_high_2050_5_rast, threshold_value)
+output_file <- file.path(output_dir, "zonal_stats_results_2050_5.csv")
+write.csv(results, output_file, row.names = FALSE)
+add_comb_ssp5_2050_layer <- create_layer_function(data = combined_2050_5_positive, yaml_key = "comb",group_id="combined-flooding-ssp5-2050")
+all_maps <-add_comb_ssp5_2050_layer(all_maps)
+ssp5 <- add_comb_ssp5_2050_layer(ssp5)
+year_2050 <-add_comb_ssp5_2050_layer(year_2050)
+comb_layers <- c(comb_layers, "combined-flooding-ssp5-2050")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$comb_flooding_SSP2_2050)
+```
+### Population Exposed SSP5 2050
+
+```{r}
+#| include: false
+pop_low_ssp5_2050 <- fuzzy_read(spatial_dir, "pop_comb_SSP5_2050_1in10.tif", rast)
+pop_med_ssp5_2050 <- fuzzy_read(spatial_dir, "pop_comb_SSP5_2050_1in100.tif", rast)
+pop_high_ssp5_2050 <- fuzzy_read(spatial_dir, "pop_comb_SSP5_2050_1in1000.tif", rast)
+# Interactive Plot (Leaflet)
+pop_ssp5_2050 <- max(pop_low_ssp5_2050,pop_med_ssp5_2050,pop_high_ssp5_2050,na.rm = TRUE)
+masked_pop_ssp5_2050 <- mask(pop_ssp5_2050, aoi)
+
+# # Replace negative values with zero
+# pop_2020_positive <- pop_2020
+# pop_2020_positive[pop_2020_positive <= 0] <- NA
+
+add_pop_ssp5_2050_layer <- create_layer_function(data = masked_pop_ssp5_2050, yaml_key = "pop_flood",group_id="population-exposed-ssp5-2050")
+all_maps <-add_pop_ssp5_2050_layer(all_maps)
+ssp5 <- add_pop_ssp5_2050_layer(ssp5)
+year_2050 <-add_pop_ssp5_2050_layer(year_2050)
+comb_layers <- c(comb_layers, "population-exposed-ssp5-2050")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_pop <- pop_exposed("generated/pop_exposure1.csv", 2050, "SSP5")
+graphs_pop
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$pop_flooding_2050)
+```
+
+
+###  Roads Exposed to Floods SSP5 2050
+
+```{r}
+#| include: false
+road_med_ssp5_2050 <- fuzzy_read(spatial_dir, "roads_flood_SSP5_2050_1in100", rast)
+values(road_med_ssp5_2050)[values(road_med_ssp5_2050) == 0] <-NA  
+road_med_ssp5_2050_positive <- road_med_ssp5_2050
+road_med_ssp5_2050_positive[road_med_ssp5_2050_positive <= 0] <- NA
+
+add_road_SSP5_2050_layer <- create_layer_function(data = road_med_ssp5_2050_positive, yaml_key = "roads-exposed",group_id="roads-exposed-to-floods-ssp5-2050")
+all_maps <-add_road_SSP5_2050_layer(all_maps)
+comb_layers <- c(comb_layers, "roads-exposed-to-floods-ssp5-2050")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_2050 <- roads_exposed("generated/road_exposure1.csv", 2050)
+graphs_2050[[4]]
+print_slide_text(slide_texts$FCS_water$road_flooding_2050)
+```
+### Combined Flooding SSP2 2080
+
+```{r}
+#| include: false
+comb_low_2080 <- fuzzy_read(spatial_dir, "comb_flood_SSP2_2080_1in10.tif", rast)
+comb_med_2080 <- fuzzy_read(spatial_dir, "comb_flood_SSP2_2080_1in100.tif", rast) * 10
+comb_high_2080 <- fuzzy_read(spatial_dir, "comb_flood_SSP2_2080_1in1000.tif", rast) * 11
+
+#rework this 
+combined_2080 <- max(comb_med_2080, comb_high_2080, na.rm = T)
+combined_2080_positive <- combined_2080
+combined_2080_positive[combined_2080_positive <= 0] <- NA
+
+comb_high_2080_rast <- raster::raster(comb_high_2080)
+threshold_value <- 1
+results <- zonal_stats_binary(infrastructure_points, comb_high_2080_rast, threshold_value)
+output_file <- file.path(output_dir, "zonal_stats_results_2080.csv")
+write.csv(results, output_file, row.names = FALSE)
+add_comb_2080_layer <- create_layer_function(data = combined_2080_positive, yaml_key = "comb",group_id="combined-flooding-ssp2-2080")
+all_maps <-add_comb_2080_layer(all_maps)
+ssp2 <- add_comb_2080_layer(ssp2)
+year_2080 <-add_comb_2080_layer(year_2080)
+comb_layers <- c(comb_layers, "combined-flooding-ssp2-2080")
+
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$comb_flooding_SSP2_2080)
+```
+### Population Exposed SSP2 2080
+
+```{r}
+#| include: false
+pop_low_ssp2_2080 <- fuzzy_read(spatial_dir, "pop_comb_SSP2_2080_1in10.tif", rast)
+pop_med_ssp2_2080 <- fuzzy_read(spatial_dir, "pop_comb_SSP2_2080_1in100.tif", rast)
+pop_high_ssp2_2080 <- fuzzy_read(spatial_dir, "pop_comb_SSP2_2080_1in1000.tif", rast)
+# Interactive Plot (Leaflet)
+pop_ssp2_2080 <- max(pop_low_ssp2_2080,pop_med_ssp2_2080,pop_high_ssp2_2080,na.rm = TRUE)
+masked_pop_ssp2_2080 <- mask(pop_ssp2_2080, aoi)
+
+# # Replace negative values with zero
+# pop_2020_positive <- pop_2020
+# pop_2020_positive[pop_2020_positive <= 0] <- NA
+
+add_pop_ssp2_2080_layer <- create_layer_function(data = masked_pop_ssp2_2080, yaml_key = "pop_flood",group_id="population-exposed-ssp2-2080")
+all_maps <-add_pop_ssp2_2080_layer(all_maps)
+ssp2 <- add_pop_ssp2_2080_layer(ssp2)
+year_2080 <-add_pop_ssp2_2080_layer(year_2080)
+comb_layers <- c(comb_layers, "population-exposed-ssp2-2080")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_pop <- pop_exposed("generated/pop_exposure1.csv", 2080, "SSP2")
+graphs_pop
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$pop_flooding_2080)
+```
+
+###  Roads Exposed to Floods SSP2 2080
+
+```{r}
+#| include: false
+road_med_ssp2_2080 <- fuzzy_read(spatial_dir, "roads_flood_SSP2_2080_1in100", rast)
+values(road_med_ssp2_2080)[values(road_med_ssp2_2080) == 0] <-NA  
+road_med_ssp2_2080_positive <- road_med_ssp2_2080
+road_med_ssp2_2080_positive[road_med_ssp2_2080_positive <= 0] <- NA
+
+add_road_SSP2_2080_layer <- create_layer_function(data = road_med_ssp2_2080_positive, yaml_key = "roads-exposed",group_id="roads-exposed-to-floods-ssp2-2080")
+all_maps <-add_road_SSP2_2080_layer(all_maps)
+comb_layers <- c(comb_layers, "roads-exposed-to-floods-ssp2-2080")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_2080 <- roads_exposed("generated/road_exposure1.csv", 2080)
+graphs_2080[[2]]
+#graphs_2080[[4]]
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$road_flooding_2080)
+```
+
+### Combined Flooding SSP5 2080
+
+```{r}
+#| include: false
+comb_low_2080 <- fuzzy_read(spatial_dir, "comb_flood_SSP5_2080_1in10.tif", rast)
+comb_med_5_2080 <- fuzzy_read(spatial_dir, "comb_flood_SSP5_2080_1in100.tif", rast) * 10
+comb_high_5_2080 <- fuzzy_read(spatial_dir, "comb_flood_SSP5_2080_1in1000.tif", rast) * 11
+
+#rework this 
+combined_5_2080 <- max(comb_med_5_2080, comb_high_5_2080, na.rm = T)
+combined_5_2080[combined_5_2080 <= 0] <- NA
+
+comb_high_2080_5 <- raster::raster(comb_high_5_2080)
+threshold_value <- 1
+results <- zonal_stats_binary(infrastructure_points, comb_high_2080_5, threshold_value)
+output_file <- file.path(output_dir, "zonal_stats_results_2080_5.csv")
+write.csv(results, output_file, row.names = FALSE)
+
+add_comb_5_2080_layer <- create_layer_function(data = combined_5_2080, yaml_key = "comb",group_id="combined-flooding-ssp5-2080")
+all_maps <-add_comb_5_2080_layer(all_maps) 
+ssp5 <- add_comb_5_2080_layer(ssp5)
+year_2080 <-add_comb_5_2080_layer(year_2080)
+comb_layers <- c(comb_layers, "combined-flooding-ssp5-2080")
+
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$comb_flooding_SSP5_2080)
+```
+### Population Exposed SSP5 2080
+
+```{r}
+#| include: false
+pop_low_ssp5_2080 <- fuzzy_read(spatial_dir, "pop_comb_SSP5_2080_1in10.tif", rast)
+pop_med_ssp5_2080 <- fuzzy_read(spatial_dir, "pop_comb_SSP5_2080_1in100.tif", rast)
+pop_high_ssp5_2080 <- fuzzy_read(spatial_dir, "pop_comb_SSP5_2080_1in1000.tif", rast)
+# Interactive Plot (Leaflet)
+pop_ssp5_2080 <- max(pop_low_ssp5_2080,pop_med_ssp5_2080,pop_high_ssp5_2080,na.rm = TRUE)
+masked_pop_ssp5_2080 <- mask(pop_ssp5_2080, aoi)
+
+# # Replace negative values with zero
+# pop_2020_positive <- pop_2020
+# pop_2020_positive[pop_2020_positive <= 0] <- NA
+
+add_pop_ssp5_2080_layer <- create_layer_function(data = masked_pop_ssp5_2080, yaml_key = "pop_flood",group_id="population-exposed-ssp5-2080")
+all_maps <-add_pop_ssp5_2080_layer(all_maps)
+ssp5 <- add_pop_ssp5_2080_layer(ssp5)
+year_2080 <-add_pop_ssp5_2080_layer(year_2080)
+comb_layers <- c(comb_layers, "population-exposed-ssp5-2080")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_pop <- pop_exposed("generated/pop_exposure1.csv", 2080,"SSP5")
+graphs_pop
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$pop_flooding_2080)
+```
+###  Roads Exposed to Floods SSP5 2080
+
+```{r}
+#| include: false
+road_med_ssp5_2080 <- fuzzy_read(spatial_dir, "roads_flood_SSP5_2080_1in100", rast)
+values(road_med_ssp5_2080)[values(road_med_ssp5_2080) == 0] <-NA  
+road_med_ssp5_2080_positive <- road_med_ssp5_2080
+road_med_ssp5_2080_positive[road_med_ssp5_2080_positive <= 0] <- NA
+
+add_road_SSP5_2080_layer <- create_layer_function(data = road_med_ssp5_2080_positive, yaml_key = "roads-exposed",group_id="roads-exposed-to-floods-ssp5-2080")
+all_maps <-add_road_SSP5_2080_layer(all_maps)
+comb_layers <- c(comb_layers, "roads-exposed-to-floods-ssp5-2080")
+```
+
+```{r, output=TRUE}
+#| output: asis
+graphs_2080 <- roads_exposed("generated/road_exposure1.csv", 2080)
+#graphs_2080[[2]]
+graphs_2080[[4]]
+```
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$road_flooding_2080)
+```
+### Water scarcity
+
+```{r, output=TRUE}
+# saveRDS(density_plot, "generated/plots/density.rds")
+#ggplotly(readRDS("generated/plots/density.rds") + labs(y = "People per square kilometer"))
+water <- read.csv("generated/waterscarcity.csv")
+names(water) <- sapply(str_remove_all(colnames(water), "X"), "[")
+w <- as.matrix(water[, -1])
+rownames(w) <- water[['Scenario']]
+
+# Remove first and last columns
+w <- w[, -c(1, ncol(w))]
+
+# Remove 'WSI_' prefix from column names
+colnames(w) <- sub("^WSI_", "", colnames(w))
+rownames(w) <- sub("(SSP[1-5]).*", "\\1", rownames(w))
+
+w_char <- format(w, digits = 2, nsmall = 2)
+
+# Create a Plotly plot
+plot_ly(z = w, colorscale = "RdOrYl") %>%
+  add_heatmap(x = colnames(w), y = rownames(w), text = w_char,
+              hoverinfo = "text") %>%
+  layout(
+    title = " ",
+    xaxis = list(title = "Month"),
+    yaxis = list(title = "Scenario"),
+    hoverlabel = list(font = list(color = "white"))  # Set hover text color
+  )
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_water$water_chart)
+```
+
+## Biophysical Impacts
+
+### Future Erosion
+```{r, output=TRUE}
+erosion_graph <- read.csv("generated/erosion.csv")
+range <- range(read.csv("generated/erosion.csv")$percentile_50, na.rm = TRUE)
+erosion_points <- fuzzy_read(spatial_dir,"erosion.gpkg")
+#erosion_lines <- fuzzy_read(spatial_dir,"erosion_lines.shp")
+erosion_points$percentile_50 <- as.numeric(erosion_points$percentile_50)
+erosion_points$Category <- ifelse(erosion_points$percentile_50 < 0, "Erosion", "Accretion")
+# Manually assigning colors based on Category column
+erosion_points$color <- ifelse(erosion_points$Category == "Accretion", "red", "green")
+add_erosion_layer <- create_layer_function(data = erosion_points, yaml_key = "erosion",group_id="future-erosion")
+#add_erosion_lines_layer <- create_layer_function(data = erosion_lines, yaml_key = "erosion_points",group_id="future-erosion")
+all_maps <-add_erosion_layer(all_maps)
+pu_layers <- c(pu_layers, "future-erosion")
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_erosion$erosion_chart)
+```
+
+### Tropical Cyclones
+
+```{r, output=TRUE}
+cyclone_graph <-read.csv("generated/cyclones.csv")
+visualize_cyclones(cyclone_graph,city,country)
+```
+
+```{r}
+#| output: asis
+print_slide_text(slide_texts$FCS_cyclones$cyclones_chart)
+```
+
+```{r}
+added_layers <-c(pop_layers, gdp_layers,ul_layers,ahe_layers,uhi_layers,pu_layers,fu_layers,comb_layers)
+```
+
+```{r}
+library(leaflet)
+
+add_radio_buttons <- function(map, input_id = "scenario_selector", options = c("SSP2", "SSP5", "2050", "2100")) {
+  # Create the radio button HTML
+  radio_html <- paste0(
+    '<div id="radio-container" style="position: absolute; bottom: 20px; left: 20px; z-index: 1000;">',
+    '<div style="background: white; box-shadow: 0 0 15px rgba(0,0,0,0.2); padding: 10px; border-radius: 5px;">',
+    '<strong>Select Scenario:</strong><br>',
+    paste(
+      sapply(options, function(option) {
+        sprintf('<input type="radio" name="%s" value="%s" style="margin: 5px;"> %s<br>', input_id, option, option)
+      }),
+      collapse = ""
+    ),
+    '</div>',
+    '</div>'
+  )
+  
+  # Add the custom control to the map
+  map <- map %>%
+    htmlwidgets::onRender(sprintf("
+      function(el, x) {
+        var container = document.createElement('div');
+        container.innerHTML = `%s`;
+        container.style.fontFamily = 'inherit';  // Ensure CSS inheritance
+        L.DomUtil.get(el).appendChild(container);
+      }
+    ", radio_html))
+  
+  return(map)
+}
+
+```
+
+
+### Feedback
+
+```{ojs}
+//| output: true
+viewof ul3 = Inputs.textarea({placeholder: "What are the key takeaways from this data?", width: "100%"})
+// I could set submit: true to require a submit button, but I think it's easier if they don't have to
+// Only helpful if we're doing something other than letting them record everything at the end
+```
+:::
+
+::: maps
+```{r}
+#| output: true
+#| label: leaflet_maps
+all_maps %>% add_radio_buttons() %>% 
+  add_aoi() %>%
+  addLayersControl(
+    overlayGroups = added_layers,
+    options = layersControlOptions(collapsed = TRUE))
+```
+:::
+
+::: foot
+Last edited September 2024
+
+This City Future Scan is a product of the City Resilience Program.
+
+The findings, interpretations, and conclusions expressed in this City Future Scan do not necessarily reflect the views of the World Bank, the Executive Directors of the World Bank, or the governments they represent. Given that the data included in this work are derived from global sources, the World Bank does not guarantee its accuracy.
+
+:::
+
+
